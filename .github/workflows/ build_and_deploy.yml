@@ -60,13 +60,40 @@ env:
   CLOUD_RUN_REGION: 'europe-west2'
   REPOSITORY: '${{ secrets.GCP_PROJECT_NAME }}-gcr'
   WORKLOAD_IDENTITY_PROVIDER: 'projects/${{ secrets.PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github/providers/github'
-  DEPLOY_EXAMPLE: 'true' # <--- Toggle this to 'true' to deploy the example folder
 
 jobs:
+  # Find which folders under src/students/ changed in this push (e.g. ["example", "aduuna"])
+  changed-folders:
+    runs-on: 'ubuntu-latest'
+    outputs:
+      matrix: ${{ steps.changed.outputs.all_changed_files }}
+    steps:
+      - uses: 'actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332' # actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: 'changed'
+        uses: 'tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96' # tj-actions/changed-files@v47.0.6
+        with:
+          since_last_remote_commit: true
+          path: 'src/students'
+          dir_names: true
+          dir_names_exclude_current_dir: true
+          dir_names_max_depth: 1
+          matrix: true
+
+  # Deploy each changed folder: "example" goes to the root service, anything else to that student's service
   setup-build-publish-deploy:
-    name: 'Setup, Build, Publish, and Deploy'
+    name: 'Deploy ${{ matrix.folder }}'
+    needs: 'changed-folders'
+    if: ${{ needs.changed-folders.outputs.matrix != '[]' && needs.changed-folders.outputs.matrix != '' }}
     runs-on: 'ubuntu-latest'
     environment: 'production'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJson(needs.changed-folders.outputs.matrix) }}
 
     permissions:
       contents: 'read'
@@ -77,28 +104,6 @@ jobs:
         uses: 'actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332' # actions/checkout@v4
         with:
           ref: 'development'
-
-      # Fetch the merged PR's author username using GitHub API
-      - name: 'Get PR Author'
-        id: get_pr_author
-        run: |
-          # Query the GitHub API to find the PR associated with the commit SHA
-          PR_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls?state=closed&sort=updated&direction=desc")
-          
-          # Extract the PR author's username for the PR that matches the commit SHA
-          PR_AUTHOR=$(echo "$PR_RESPONSE" | jq -r --arg sha "${{ github.sha }}" \
-            '.[] | select(.merge_commit_sha == $sha) | .user.login')
-          
-          # Fallback to github.actor if no PR author is found
-          if [ -z "$PR_AUTHOR" ]; then
-            PR_AUTHOR="${{ github.actor }}"
-          fi
-          
-          echo "PR_AUTHOR=$PR_AUTHOR" >> $GITHUB_ENV
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Configure Workload Identity Federation and generate an access token.
       #
@@ -119,47 +124,31 @@ jobs:
           password: '${{ steps.auth.outputs.auth_token }}'
           registry: '${{ env.GAR_LOCATION }}-docker.pkg.dev'
 
-      - name: 'Debug Token and Account'
-        run: |
-          # Log the token (masked for security, truncated)
-          echo "Access Token (first 10 chars): ${GITHUB_TOKEN:0:10}..."
-          # Decode the JWT token to extract the email (requires jq)
-          echo "${{ steps.auth.outputs.auth_token }}" | jq -R 'split(".") | .[1] | @base64d | fromjson | .email' || echo "Failed to decode token (install jq if needed)"
-        env:
-          GITHUB_TOKEN: ${{ steps.auth.outputs.auth_token }}
-
       # Build the Docker image
       - name: 'Build Docker container'
         run: |-
-          if [ "${{ env.DEPLOY_EXAMPLE }}" = "true" ] && { [ "$PR_AUTHOR" = "oliverangelil" ] || [ "$PR_AUTHOR" = "aduuna" ] || [ "$PR_AUTHOR" = "shaddydevops" ] || [ "$PR_AUTHOR" = "a-stephen" ]; }; then
+          FOLDER="${{ matrix.folder }}"
+          echo "FOLDER=$FOLDER" >> $GITHUB_ENV
+          if [ "$FOLDER" = "example" ]; then
             DEPLOYMENT_TARGET="ROOT"
-            echo "CLOUD_RUN_SERVICE=${{ secrets.GCP_PROJECT_NAME }}-service" >> $GITHUB_ENV
-            echo "IMAGE=${{ secrets.GCP_PROJECT_NAME }}-image" >> $GITHUB_ENV
-            IMAGE=${{ secrets.GCP_PROJECT_NAME }}-image
+            SUFFIX=""
           else
             DEPLOYMENT_TARGET="STUDENT"
-            echo "CLOUD_RUN_SERVICE=${{ secrets.GCP_PROJECT_NAME }}-service-$(echo "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-            echo "IMAGE=${{ secrets.GCP_PROJECT_NAME }}-image-$(echo "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-            IMAGE="${{ secrets.GCP_PROJECT_NAME }}-image-$(echo "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')"
+            SUFFIX="-$(echo "$FOLDER" | tr '[:upper:]' '[:lower:]')"
           fi
+          IMAGE="${{ secrets.GCP_PROJECT_NAME }}-image${SUFFIX}"
+          echo "CLOUD_RUN_SERVICE=${{ secrets.GCP_PROJECT_NAME }}-service${SUFFIX}" >> $GITHUB_ENV
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
           echo "DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
           DOCKER_TAG="${GAR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE}:${GITHUB_SHA}"
           docker build \
             --build-arg DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET \
-            --build-arg GITHUB_USER="${{ env.PR_AUTHOR }}" \
+            --build-arg GITHUB_USER="$FOLDER" \
             --tag "${DOCKER_TAG}" \
             --build-arg GITHUB_SHA="${GITHUB_SHA}" \
             --build-arg GITHUB_REF="${GITHUB_REF}" \
             .
       
-      - name: 'Debug Docker Login'
-        run: |
-          cat ~/.docker/config.json
-          # Test Docker auth by pulling an image (optional, requires an existing image)
-          docker pull ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:test || echo "Pull failed (expected if no test image exists)"
-          docker pull ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/test-image:latest || echo "Pull failed (expected if no manual push test image exists)"
-          # Log the Docker tag for confirmation
-          echo "Docker Tag: ${GAR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${IMAGE}:${GITHUB_SHA}"
 
       - name: 'push Docker container'
         run: |-
@@ -174,10 +163,7 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --set-env-vars GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }} \
-            --set-env-vars GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }} \
-            --set-env-vars GOOGLE_CSE_ID=${{ secrets.GOOGLE_CSE_ID }} \
-            --set-env-vars SLACK_API_TOKEN=${{ secrets.SLACK_API_TOKEN }} \
-            --set-env-vars GITHUB_USER=${{ env.PR_AUTHOR }} \
+            --set-env-vars GITHUB_USER=${{ env.FOLDER }} \
             --set-env-vars DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
             --project ${{ env.PROJECT_ID }}
 
