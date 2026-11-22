@@ -131,7 +131,7 @@ jobs:
       # Build the Docker image
       - name: 'Build Docker container'
         run: |-
-          if [ "${{ env.DEPLOY_EXAMPLE }}" = "true" ] && { [ "$PR_AUTHOR" = "oliverangelil" ] || [ "$PR_AUTHOR" = "aduuna" ] || [ "$PR_AUTHOR" = "cyrille-feu" ]; }; then
+          if [ "${{ env.DEPLOY_EXAMPLE }}" = "true" ] && { [ "$PR_AUTHOR" = "oliverangelil" ] || [ "$PR_AUTHOR" = "aduuna" ] || [ "$PR_AUTHOR" = "shaddydevops" ] || [ "$PR_AUTHOR" = "a-stephen" ]; }; then
             DEPLOYMENT_TARGET="ROOT"
             echo "CLOUD_RUN_SERVICE=${{ secrets.GCP_PROJECT_NAME }}-service" >> $GITHUB_ENV
             echo "IMAGE=${{ secrets.GCP_PROJECT_NAME }}-image" >> $GITHUB_ENV
