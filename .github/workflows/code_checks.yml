@@ -56,11 +56,10 @@ jobs:
       with:
         version: "0.5.29"
 
-    - name: install python
-      uses: actions/setup-python@v5
-      with:
-        python-version-file: "pyproject.toml"
-        
+    # No separate setup-python step: uv sync downloads the exact Python pinned in
+    # pyproject.toml (requires-python) from python-build-standalone, which works on
+    # any runner image. actions/setup-python only has prebuilt patch versions for
+    # specific Ubuntu releases and fails when ubuntu-latest moves forward.
     - name: install python packages
       run: uv sync
 
